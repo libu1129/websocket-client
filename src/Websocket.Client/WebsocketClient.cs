@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -7,7 +8,9 @@ using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using System.Text;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
+
 using Websocket.Client.Exceptions;
 using Websocket.Client.Logging;
 using Websocket.Client.Models;
@@ -41,6 +44,12 @@ namespace Websocket.Client
         private readonly Subject<ReconnectionInfo> _reconnectionSubject = new Subject<ReconnectionInfo>();
         private readonly Subject<DisconnectionInfo> _disconnectedSubject = new Subject<DisconnectionInfo>();
 
+        private Channel<byte[]> received_queue = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions()
+        {
+            SingleReader = true,
+            SingleWriter = true
+        });
+
         /// <summary>
         /// A simple websocket client with built-in reconnection and error handling
         /// </summary>
@@ -50,6 +59,8 @@ namespace Websocket.Client
             : this(url, GetClientFactory(clientFactory))
         {
         }
+
+
 
         /// <summary>
         /// A simple websocket client with built-in reconnection and error handling
@@ -71,6 +82,19 @@ namespace Websocket.Client
                 await client.ConnectAsync(uri, token).ConfigureAwait(false);
                 return client;
             });
+            receive_loop();
+        }
+
+        private async void receive_loop()
+        {
+            while (!this._disposing && await received_queue.Reader.WaitToReadAsync())
+            {
+                while (received_queue.Reader.TryRead(out var raw_bytes))
+                {
+                    var message = ResponseMessage.BinaryMessage(raw_bytes);
+                    _messageReceivedSubject.OnNext(message);
+                }
+            }
         }
 
         /// <inheritdoc />
@@ -422,7 +446,7 @@ namespace Websocket.Client
             try
             {
                 // define buffer here and reuse, to avoid more allocation
-                const int chunkSize = 1024 * 4;
+                const int chunkSize = 1024 * 1024 * 10;
                 var buffer = new ArraySegment<byte>(new byte[chunkSize]);
 
                 do
@@ -481,17 +505,7 @@ namespace Websocket.Client
                     ms?.Seek(0, SeekOrigin.Begin);
 
                     ResponseMessage message;
-                    if (result.MessageType == WebSocketMessageType.Text && IsTextMessageConversionEnabled)
-                    {
-                        var data = ms != null ?
-                            GetEncoding().GetString(ms.ToArray()) :
-                            resultArrayWithTrailing != null ?
-                                GetEncoding().GetString(resultArrayWithTrailing, 0, resultArraySize) :
-                                null;
-
-                        message = ResponseMessage.TextMessage(data);
-                    }
-                    else if (result.MessageType == WebSocketMessageType.Close)
+                    if (result.MessageType == WebSocketMessageType.Close)
                     {
                         Logger.Trace(L($"Received close message"));
 
@@ -525,24 +539,19 @@ namespace Websocket.Client
 
                         return;
                     }
-                    else
-                    {
-                        if (ms != null)
-                        {
-                            message = ResponseMessage.BinaryMessage(ms.ToArray());
-                        }
-                        else
-                        {
-                            Array.Resize(ref resultArrayWithTrailing, resultArraySize);
-                            message = ResponseMessage.BinaryMessage(resultArrayWithTrailing);
-                        }
-                    }
 
+
+                    byte[] ret = ms != null ? ms.ToArray() : new byte[resultArraySize];
+                    if (ms == null) Buffer.BlockCopy(resultArrayWithTrailing, 0, ret, 0, resultArraySize);
+
+                    //var binary = ms.ToArray();
                     ms?.Dispose();
+                    //received_queue.Enqueue(binary);
 
-                    Logger.Trace(L($"Received:  {message}"));
+                    //Logger.Trace(L($"Received:  {message}"));
+                    this.received_queue.Writer.TryWrite(ret);
+                    //_messageReceivedSubject.OnNext(message);
                     _lastReceivedMsg = DateTime.UtcNow;
-                    _messageReceivedSubject.OnNext(message);
 
                 } while (client.State == WebSocketState.Open && !token.IsCancellationRequested);
             }

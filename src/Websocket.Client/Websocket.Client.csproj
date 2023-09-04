@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFrameworks>netstandard2.0;netstandard2.1;net6;net7</TargetFrameworks>
+		<TargetFrameworks>net7</TargetFrameworks>
 		<PackageId>Websocket.Client</PackageId>
 		<Authors>Mariusz Kotas</Authors>
 		<Description>Client for websocket API with built-in reconnection and error handling</Description>
