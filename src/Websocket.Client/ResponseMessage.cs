@@ -5,7 +5,7 @@ namespace Websocket.Client
     /// <summary>
     /// Received message, could be Text or Binary
     /// </summary>
-    public struct ResponseMessage
+    public class ResponseMessage
     {
         private ResponseMessage(byte[] binary, string text, WebSocketMessageType messageType)
         {

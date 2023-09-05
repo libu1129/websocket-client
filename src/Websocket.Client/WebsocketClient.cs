@@ -44,10 +44,10 @@ namespace Websocket.Client
         private readonly Subject<ReconnectionInfo> _reconnectionSubject = new Subject<ReconnectionInfo>();
         private readonly Subject<DisconnectionInfo> _disconnectedSubject = new Subject<DisconnectionInfo>();
 
-        private Channel<byte[]> received_queue = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions()
+        private Channel<receive_vm> received_queue = Channel.CreateUnbounded<receive_vm>(new UnboundedChannelOptions()
         {
             SingleReader = true,
-            SingleWriter = true
+            SingleWriter = false
         });
 
         /// <summary>
@@ -89,10 +89,52 @@ namespace Websocket.Client
         {
             while (!this._disposing && await received_queue.Reader.WaitToReadAsync())
             {
-                while (received_queue.Reader.TryRead(out var raw_bytes))
+                while (received_queue.Reader.TryRead(out var rcv))
                 {
-                    var message = ResponseMessage.BinaryMessage(raw_bytes);
-                    _messageReceivedSubject.OnNext(message);
+                    var result = rcv.result;
+
+
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        Logger.Trace(L($"Received close message"));
+
+                        if (!IsStarted || _stopping)
+                        {
+                            return;
+                        }
+
+                        var info = DisconnectionInfo.Create(DisconnectionType.ByServer, _client, null);
+                        _disconnectedSubject.OnNext(info);
+
+                        if (info.CancelClosing)
+                        {
+                            // closing canceled, reconnect if enabled
+                            if (IsReconnectionEnabled)
+                            {
+                                throw new OperationCanceledException("Websocket connection was closed by server");
+                            }
+
+                            continue;
+                        }
+
+                        await StopInternal(_client, WebSocketCloseStatus.NormalClosure, "Closing",
+                            _cancellation.Token, false, true);
+
+                        // reconnect if enabled
+                        if (IsReconnectionEnabled && !ShouldIgnoreReconnection(_client))
+                        {
+                            _ = ReconnectSynchronized(ReconnectionType.Lost, false, null);
+                        }
+
+                        continue;
+                    }
+
+                    if (this.IsRunning)
+                    {
+                        var message = ResponseMessage.BinaryMessage(rcv.data);
+                        if (message != null)
+                            _messageReceivedSubject.OnNext(message);
+                    }
                 }
             }
         }
@@ -440,120 +482,136 @@ namespace Websocket.Client
             return _client.State == WebSocketState.Open;
         }
 
+        public class receive_vm
+        {
+            public WebSocketReceiveResult result;
+            public byte[] data;
+        }
+
+
         private async Task Listen(WebSocket client, CancellationToken token)
         {
             Exception causedException = null;
             try
             {
                 // define buffer here and reuse, to avoid more allocation
-                const int chunkSize = 1024 * 1024 * 10;
+                const int chunkSize = 1024 * 1024 * 50;
                 var buffer = new ArraySegment<byte>(new byte[chunkSize]);
 
                 do
                 {
-                    WebSocketReceiveResult result;
-                    byte[] resultArrayWithTrailing = null;
-                    var resultArraySize = 0;
-                    var isResultArrayCloned = false;
-                    MemoryStream ms = null;
-
-                    while (true)
+                    var rcv = await client.ReceiveAsync(buffer, token).ConfigureAwait(false);
+                    var item = new receive_vm()
                     {
-                        result = await client.ReceiveAsync(buffer, token);
-                        var currentChunk = buffer.Array;
-                        var currentChunkSize = result.Count;
-
-                        var isFirstChunk = resultArrayWithTrailing == null;
-                        if (isFirstChunk)
-                        {
-                            // first chunk, use buffer as reference, do not allocate anything
-                            resultArraySize += currentChunkSize;
-                            resultArrayWithTrailing = currentChunk;
-                            isResultArrayCloned = false;
-                        }
-                        else if (currentChunk == null)
-                        {
-                            // weird chunk, do nothing
-                        }
-                        else
-                        {
-                            // received more chunks, lets merge them via memory stream
-                            if (ms == null)
-                            {
-                                // create memory stream and insert first chunk
-                                ms = new MemoryStream();
-                                ms.Write(resultArrayWithTrailing, 0, resultArraySize);
-                            }
-
-                            // insert current chunk
-                            ms.Write(currentChunk, buffer.Offset, currentChunkSize);
-                        }
-
-                        if (result.EndOfMessage)
-                        {
-                            break;
-                        }
-
-                        if (isResultArrayCloned)
-                            continue;
-
-                        // we got more chunks incoming, need to clone first chunk
-                        resultArrayWithTrailing = resultArrayWithTrailing?.ToArray();
-                        isResultArrayCloned = true;
-                    }
-
-                    ms?.Seek(0, SeekOrigin.Begin);
-
-                    ResponseMessage message;
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        Logger.Trace(L($"Received close message"));
-
-                        if (!IsStarted || _stopping)
-                        {
-                            return;
-                        }
-
-                        var info = DisconnectionInfo.Create(DisconnectionType.ByServer, client, null);
-                        _disconnectedSubject.OnNext(info);
-
-                        if (info.CancelClosing)
-                        {
-                            // closing canceled, reconnect if enabled
-                            if (IsReconnectionEnabled)
-                            {
-                                throw new OperationCanceledException("Websocket connection was closed by server");
-                            }
-
-                            continue;
-                        }
-
-                        await StopInternal(client, WebSocketCloseStatus.NormalClosure, "Closing",
-                            token, false, true);
-
-                        // reconnect if enabled
-                        if (IsReconnectionEnabled && !ShouldIgnoreReconnection(client))
-                        {
-                            _ = ReconnectSynchronized(ReconnectionType.Lost, false, null);
-                        }
-
-                        return;
-                    }
-
-
-                    byte[] ret = ms != null ? ms.ToArray() : new byte[resultArraySize];
-                    if (ms == null) Buffer.BlockCopy(resultArrayWithTrailing, 0, ret, 0, resultArraySize);
-
-                    //var binary = ms.ToArray();
-                    ms?.Dispose();
-                    //received_queue.Enqueue(binary);
-
-                    //Logger.Trace(L($"Received:  {message}"));
-                    this.received_queue.Writer.TryWrite(ret);
-                    //_messageReceivedSubject.OnNext(message);
+                        result = rcv,
+                        data = new byte[rcv.Count],
+                    };
+                    Buffer.BlockCopy(buffer.Array, 0, item.data, 0, rcv.Count);
                     _lastReceivedMsg = DateTime.UtcNow;
-
+                    this.received_queue.Writer.TryWrite(item);
                 } while (client.State == WebSocketState.Open && !token.IsCancellationRequested);
+
+
+
+                //do
+                //{
+                //    WebSocketReceiveResult result;
+                //    byte[] resultArrayWithTrailing = null;
+                //    var resultArraySize = 0;
+                //    var isResultArrayCloned = false;
+                //    MemoryStream ms = null;
+
+                //    while (true)
+                //    {
+                //        result = await client.ReceiveAsync(buffer, token);
+                //        var currentChunk = buffer.Array;
+                //        var currentChunkSize = result.Count;
+
+                //        var isFirstChunk = resultArrayWithTrailing == null;
+                //        if (isFirstChunk)
+                //        {
+                //            // first chunk, use buffer as reference, do not allocate anything
+                //            resultArraySize += currentChunkSize;
+                //            resultArrayWithTrailing = currentChunk;
+                //            isResultArrayCloned = false;
+                //        }
+                //        else if (currentChunk == null)
+                //        {
+                //            // weird chunk, do nothing
+                //        }
+                //        else
+                //        {
+                //            // received more chunks, lets merge them via memory stream
+                //            if (ms == null)
+                //            {
+                //                // create memory stream and insert first chunk
+                //                ms = new MemoryStream();
+                //                ms.Write(resultArrayWithTrailing, 0, resultArraySize);
+                //            }
+
+                //            // insert current chunk
+                //            ms.Write(currentChunk, buffer.Offset, currentChunkSize);
+                //        }
+
+                //        if (result.EndOfMessage)
+                //        {
+                //            break;
+                //        }
+
+                //        if (isResultArrayCloned)
+                //            continue;
+
+                //        // we got more chunks incoming, need to clone first chunk
+                //        resultArrayWithTrailing = resultArrayWithTrailing?.ToArray();
+                //        isResultArrayCloned = true;
+                //    }
+
+                //    ms?.Seek(0, SeekOrigin.Begin);
+
+                //    ResponseMessage message;
+                //    if (result.MessageType == WebSocketMessageType.Close)
+                //    {
+                //        Logger.Trace(L($"Received close message"));
+
+                //        if (!IsStarted || _stopping)
+                //        {
+                //            return;
+                //        }
+
+                //        var info = DisconnectionInfo.Create(DisconnectionType.ByServer, client, null);
+                //        _disconnectedSubject.OnNext(info);
+
+                //        if (info.CancelClosing)
+                //        {
+                //            // closing canceled, reconnect if enabled
+                //            if (IsReconnectionEnabled)
+                //            {
+                //                throw new OperationCanceledException("Websocket connection was closed by server");
+                //            }
+
+                //            continue;
+                //        }
+
+                //        await StopInternal(client, WebSocketCloseStatus.NormalClosure, "Closing",
+                //            token, false, true);
+
+                //        // reconnect if enabled
+                //        if (IsReconnectionEnabled && !ShouldIgnoreReconnection(client))
+                //        {
+                //            _ = ReconnectSynchronized(ReconnectionType.Lost, false, null);
+                //        }
+
+                //        return;
+                //    }
+
+
+                //    byte[] ret = ms != null ? ms.ToArray() : new byte[resultArraySize];
+                //    if (ms == null) Buffer.BlockCopy(resultArrayWithTrailing, 0, ret, 0, resultArraySize);
+                //    ms?.Dispose();
+                //    this.received_queue.Writer.TryWrite(ret);
+                //    _lastReceivedMsg = DateTime.UtcNow;
+
+                //} while (client.State == WebSocketState.Open && !token.IsCancellationRequested);
             }
             catch (TaskCanceledException e)
             {
