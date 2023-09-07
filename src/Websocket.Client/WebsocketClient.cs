@@ -51,6 +51,12 @@ namespace Websocket.Client
             SingleWriter = false
         });
 
+
+        public WebsocketClient(string url, Func<ClientWebSocket> clientFactory = null)
+            : this(new Uri(url), GetClientFactory(clientFactory))
+        {
+        }
+
         /// <summary>
         /// A simple websocket client with built-in reconnection and error handling
         /// </summary>
