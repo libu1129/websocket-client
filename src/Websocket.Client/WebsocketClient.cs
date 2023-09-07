@@ -1,3 +1,5 @@
+using Dubu;
+
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -40,7 +42,6 @@ namespace Websocket.Client
         private CancellationTokenSource _cancellation;
         private CancellationTokenSource _cancellationTotal;
 
-        private readonly Subject<ResponseMessage> _messageReceivedSubject = new Subject<ResponseMessage>();
         private readonly Subject<ReconnectionInfo> _reconnectionSubject = new Subject<ReconnectionInfo>();
         private readonly Subject<DisconnectionInfo> _disconnectedSubject = new Subject<DisconnectionInfo>();
 
@@ -132,8 +133,8 @@ namespace Websocket.Client
                     if (this.IsRunning)
                     {
                         var message = ResponseMessage.BinaryMessage(rcv.data);
-                        if (message != null)
-                            _messageReceivedSubject.OnNext(message);
+                        if (rcv.data.Length > 0)
+                            this.MessageReceived.publish(message);
                     }
                 }
             }
@@ -150,11 +151,12 @@ namespace Websocket.Client
             }
         }
 
+        private DuTaskEvent<ResponseMessage> _message_received = new DuTaskEvent<ResponseMessage>();
+
         /// <summary>
         /// Stream with received message (raw format)
         /// </summary>
-        public IObservable<ResponseMessage> MessageReceived => _messageReceivedSubject.AsObservable();
-
+        public DuTaskEvent<ResponseMessage> MessageReceived => _message_received;
         /// <summary>
         /// Stream for reconnection event (triggered after the new connection) 
         /// </summary>
@@ -256,7 +258,7 @@ namespace Websocket.Client
                 _client?.Dispose();
                 _cancellation?.Dispose();
                 _cancellationTotal?.Dispose();
-                _messageReceivedSubject.OnCompleted();
+                MessageReceived.Dispose();
                 _reconnectionSubject.OnCompleted();
             }
             catch (Exception e)

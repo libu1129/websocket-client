@@ -1,4 +1,6 @@
-﻿using System;
+﻿using Dubu;
+
+using System;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading.Tasks;
@@ -19,7 +21,7 @@ namespace Websocket.Client
         /// <summary>
         /// Stream with received message (raw format)
         /// </summary>
-        IObservable<ResponseMessage> MessageReceived { get; }
+        DuTaskEvent<ResponseMessage> MessageReceived { get; }
 
         /// <summary>
         /// Stream for reconnection event (triggered after the new connection) 

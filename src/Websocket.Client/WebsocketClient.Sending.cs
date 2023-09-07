@@ -2,6 +2,7 @@
 using System.Net.WebSockets;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+
 using Websocket.Client.Logging;
 
 namespace Websocket.Client
@@ -91,7 +92,7 @@ namespace Websocket.Client
         {
             Validations.Validations.ValidateInput(message, nameof(message));
 
-            _messageReceivedSubject.OnNext(message);
+            MessageReceived.publish(message);
         }
 
 

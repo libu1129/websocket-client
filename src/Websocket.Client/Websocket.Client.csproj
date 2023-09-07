@@ -40,4 +40,8 @@
 		<None Include="..\..\README.md" Pack="true" PackagePath="\" />
 	</ItemGroup>
 
+	<ItemGroup>
+	  <ProjectReference Include="..\..\..\Dubu\Dubu\Dubu.csproj" />
+	</ItemGroup>
+
 </Project>
