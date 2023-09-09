@@ -45,11 +45,7 @@ namespace Websocket.Client
         private readonly Subject<ReconnectionInfo> _reconnectionSubject = new Subject<ReconnectionInfo>();
         private readonly Subject<DisconnectionInfo> _disconnectedSubject = new Subject<DisconnectionInfo>();
 
-        private Channel<receive_vm> received_queue = Channel.CreateUnbounded<receive_vm>(new UnboundedChannelOptions()
-        {
-            SingleReader = true,
-            SingleWriter = false
-        });
+        private DuTaskQueueLoop<receive_vm> received_queue { get; init; }
 
 
         public WebsocketClient(string url, Func<ClientWebSocket> clientFactory = null)
@@ -65,6 +61,9 @@ namespace Websocket.Client
         public WebsocketClient(Uri url, Func<ClientWebSocket> clientFactory = null)
             : this(url, GetClientFactory(clientFactory))
         {
+            _messagesTextToSendQueue = new DuTaskQueueLoop<string>(send_method);
+            _messagesBinaryToSendQueue = new DuTaskQueueLoop<ArraySegment<byte>>(send_method);
+            received_queue = new DuTaskQueueLoop<receive_vm>(receive_loop);
         }
 
 
@@ -89,60 +88,53 @@ namespace Websocket.Client
                 await client.ConnectAsync(uri, token).ConfigureAwait(false);
                 return client;
             });
-            receive_loop();
         }
 
-        private async void receive_loop()
+        private async Task receive_loop(receive_vm rcv)
         {
-            while (!this._disposing && await received_queue.Reader.WaitToReadAsync())
+            var result = rcv.result;
+
+
+            if (result.MessageType == WebSocketMessageType.Close)
             {
-                while (received_queue.Reader.TryRead(out var rcv))
+                Logger.Trace(L($"Received close message"));
+
+                if (!IsStarted || _stopping)
                 {
-                    var result = rcv.result;
-
-
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        Logger.Trace(L($"Received close message"));
-
-                        if (!IsStarted || _stopping)
-                        {
-                            return;
-                        }
-
-                        var info = DisconnectionInfo.Create(DisconnectionType.ByServer, _client, null);
-                        _disconnectedSubject.OnNext(info);
-
-                        if (info.CancelClosing)
-                        {
-                            // closing canceled, reconnect if enabled
-                            if (IsReconnectionEnabled)
-                            {
-                                throw new OperationCanceledException("Websocket connection was closed by server");
-                            }
-
-                            continue;
-                        }
-
-                        await StopInternal(_client, WebSocketCloseStatus.NormalClosure, "Closing",
-                            _cancellation.Token, false, true);
-
-                        // reconnect if enabled
-                        if (IsReconnectionEnabled && !ShouldIgnoreReconnection(_client))
-                        {
-                            _ = ReconnectSynchronized(ReconnectionType.Lost, false, null);
-                        }
-
-                        continue;
-                    }
-
-                    if (this.IsRunning)
-                    {
-                        var message = ResponseMessage.BinaryMessage(rcv.data);
-                        if (rcv.data.Length > 0)
-                            this.MessageReceived.publish(message);
-                    }
+                    return;
                 }
+
+                var info = DisconnectionInfo.Create(DisconnectionType.ByServer, _client, null);
+                _disconnectedSubject.OnNext(info);
+
+                if (info.CancelClosing)
+                {
+                    // closing canceled, reconnect if enabled
+                    if (IsReconnectionEnabled)
+                    {
+                        throw new OperationCanceledException("Websocket connection was closed by server");
+                    }
+
+                    return;
+                }
+
+                await StopInternal(_client, WebSocketCloseStatus.NormalClosure, "Closing",
+                    _cancellation.Token, false, true);
+
+                // reconnect if enabled
+                if (IsReconnectionEnabled && !ShouldIgnoreReconnection(_client))
+                {
+                    _ = ReconnectSynchronized(ReconnectionType.Lost, false, null);
+                }
+
+                return;
+            }
+
+            if (this.IsRunning)
+            {
+                var message = ResponseMessage.BinaryMessage(rcv.data);
+                if (rcv.data.Length > 0)
+                    this.MessageReceived.publish(message);
             }
         }
 
@@ -255,8 +247,9 @@ namespace Websocket.Client
             Logger.Debug(L("Disposing.."));
             try
             {
-                _messagesTextToSendQueue?.Writer.Complete();
-                _messagesBinaryToSendQueue?.Writer.Complete();
+                _messagesTextToSendQueue.Dispose();
+                _messagesBinaryToSendQueue.Dispose();
+                received_queue.Dispose();
                 _lastChanceTimer?.Dispose();
                 _cancellation?.Cancel();
                 _cancellationTotal?.Cancel();
@@ -516,7 +509,7 @@ namespace Websocket.Client
                     };
                     Buffer.BlockCopy(buffer.Array, 0, item.data, 0, rcv.Count);
                     _lastReceivedMsg = DateTime.UtcNow;
-                    this.received_queue.Writer.TryWrite(item);
+                    this.received_queue.add(item);
                 } while (client.State == WebSocketState.Open && !token.IsCancellationRequested);
 
 

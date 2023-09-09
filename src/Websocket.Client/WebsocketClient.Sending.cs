@@ -1,4 +1,7 @@
-﻿using System;
+﻿using Dubu;
+
+using System;
+using System.Net.Http;
 using System.Net.WebSockets;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -9,16 +12,33 @@ namespace Websocket.Client
 {
     public partial class WebsocketClient
     {
-        private readonly Channel<string> _messagesTextToSendQueue = Channel.CreateUnbounded<string>(new UnboundedChannelOptions()
+        private DuTaskQueueLoop<string> _messagesTextToSendQueue { get; init; }
+        private DuTaskQueueLoop<ArraySegment<byte>> _messagesBinaryToSendQueue { get; init; }
+
+        private async Task send_method(string message)
         {
-            SingleReader = true,
-            SingleWriter = false
-        });
-        private readonly Channel<ArraySegment<byte>> _messagesBinaryToSendQueue = Channel.CreateUnbounded<ArraySegment<byte>>(new UnboundedChannelOptions()
+            try
+            {
+                await SendInternalSynchronized(message).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                Logger.Error(e, L($"Failed to send text message: '{message}'. Error: {e.Message}"));
+            }
+        }
+
+
+        private async Task send_method(ArraySegment<byte> message)
         {
-            SingleReader = true,
-            SingleWriter = false
-        });
+            try
+            {
+                await SendInternalSynchronized(message).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                Logger.Error(e, L($"Failed to send text message: '{message}'. Error: {e.Message}"));
+            }
+        }
 
 
         /// <summary>
@@ -30,7 +50,7 @@ namespace Websocket.Client
         {
             Validations.Validations.ValidateInput(message, nameof(message));
 
-            _messagesTextToSendQueue.Writer.TryWrite(message);
+            _messagesTextToSendQueue.add(message);
         }
 
         /// <summary>
@@ -42,7 +62,7 @@ namespace Websocket.Client
         {
             Validations.Validations.ValidateInput(message, nameof(message));
 
-            _messagesBinaryToSendQueue.Writer.TryWrite(new ArraySegment<byte>(message));
+            _messagesBinaryToSendQueue.add(new ArraySegment<byte>(message));
         }
 
         /// <summary>
@@ -54,7 +74,7 @@ namespace Websocket.Client
         {
             Validations.Validations.ValidateInput(message, nameof(message));
 
-            _messagesBinaryToSendQueue.Writer.TryWrite(message);
+            _messagesBinaryToSendQueue.add(message);
         }
 
         /// <summary>
@@ -96,96 +116,14 @@ namespace Websocket.Client
         }
 
 
-        private async Task SendTextFromQueue()
-        {
-            try
-            {
-                while (await _messagesTextToSendQueue.Reader.WaitToReadAsync())
-                {
-                    while (_messagesTextToSendQueue.Reader.TryRead(out var message))
-                    {
-                        try
-                        {
-                            await SendInternalSynchronized(message).ConfigureAwait(false);
-                        }
-                        catch (Exception e)
-                        {
-                            Logger.Error(e, L($"Failed to send text message: '{message}'. Error: {e.Message}"));
-                        }
-                    }
-                }
-            }
-            catch (TaskCanceledException)
-            {
-                // task was canceled, ignore
-            }
-            catch (OperationCanceledException)
-            {
-                // operation was canceled, ignore
-            }
-            catch (Exception e)
-            {
-                if (_cancellationTotal.IsCancellationRequested || _disposing)
-                {
-                    // disposing/canceling, do nothing and exit
-                    return;
-                }
-
-                Logger.Trace(L($"Sending text thread failed, error: {e.Message}. Creating a new sending thread."));
-                StartBackgroundThreadForSendingText();
-            }
-
-        }
-
-        private async Task SendBinaryFromQueue()
-        {
-            try
-            {
-                while (await _messagesBinaryToSendQueue.Reader.WaitToReadAsync())
-                {
-                    while (_messagesBinaryToSendQueue.Reader.TryRead(out var message))
-                    {
-                        try
-                        {
-                            await SendInternalSynchronized(message).ConfigureAwait(false);
-                        }
-                        catch (Exception e)
-                        {
-                            Logger.Error(e, L($"Failed to send binary message: '{message}'. Error: {e.Message}"));
-                        }
-                    }
-                }
-            }
-            catch (TaskCanceledException)
-            {
-                // task was canceled, ignore
-            }
-            catch (OperationCanceledException)
-            {
-                // operation was canceled, ignore
-            }
-            catch (Exception e)
-            {
-                if (_cancellationTotal.IsCancellationRequested || _disposing)
-                {
-                    // disposing/canceling, do nothing and exit
-                    return;
-                }
-
-                Logger.Trace(L($"Sending binary thread failed, error: {e.Message}. Creating a new sending thread."));
-                StartBackgroundThreadForSendingBinary();
-            }
-
-        }
-
         private void StartBackgroundThreadForSendingText()
         {
-            _ = Task.Factory.StartNew(_ => SendTextFromQueue(), TaskCreationOptions.LongRunning, _cancellationTotal.Token);
+            // _ = Task.Factory.StartNew(_ => SendTextFromQueue(), TaskCreationOptions.LongRunning, _cancellationTotal.Token);
         }
 
         private void StartBackgroundThreadForSendingBinary()
         {
-            _ = Task.Factory.StartNew(_ => SendBinaryFromQueue(), TaskCreationOptions.LongRunning, _cancellationTotal.Token);
+            //_ = Task.Factory.StartNew(_ => SendBinaryFromQueue(), TaskCreationOptions.LongRunning, _cancellationTotal.Token);
         }
 
         private async Task SendInternalSynchronized(string message)
