@@ -61,9 +61,6 @@ namespace Websocket.Client
         public WebsocketClient(Uri url, Func<ClientWebSocket> clientFactory = null)
             : this(url, GetClientFactory(clientFactory))
         {
-            _messagesTextToSendQueue = new DuTaskQueueLoop<string>(send_method);
-            _messagesBinaryToSendQueue = new DuTaskQueueLoop<ArraySegment<byte>>(send_method);
-            received_queue = new DuTaskQueueLoop<receive_vm>(receive_loop);
         }
 
 
@@ -88,6 +85,10 @@ namespace Websocket.Client
                 await client.ConnectAsync(uri, token).ConfigureAwait(false);
                 return client;
             });
+
+            _messagesTextToSendQueue = new DuTaskQueueLoop<string>(send_method);
+            _messagesBinaryToSendQueue = new DuTaskQueueLoop<ArraySegment<byte>>(send_method);
+            received_queue = new DuTaskQueueLoop<receive_vm>(receive_loop);
         }
 
         private async Task receive_loop(receive_vm rcv)
